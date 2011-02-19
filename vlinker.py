@@ -1,5 +1,4 @@
-﻿# -*- coding: utf-8 -*-
-
+# -*- coding: utf-8 -*-
 import os
 import sys
 import sqlite3
@@ -7,9 +6,6 @@ import win32con, winioctlcon, winnt, win32file
 import win32com.client
 import struct
 import pywintypes
-
-SOURCES = [r'D:\projects\vlinker\1', r'D:\projects\vlinker\2', r'D:\projects\vlinker\3']
-TARGET = r'D:\projects\vlinker\result'
 
 __CSL = None
 def symlink(source, link_name):
@@ -58,25 +54,90 @@ def _get_reparse_target(filename):
     shortcut = shell.CreateShortCut(filename + '.lnk')
     return shortcut.Targetpath
 
-def create_link(cursor, filename, link):
+def create_link(connection, filename, link):
     try:
         symlink(filename, link)
     except:
         return False
     else:
-        cursor.execute('INSERT OR REPLACE INTO files(filename, link) VALUES (?, ?);', (filename, link))
+        cursor = connection.cursor()
+        cursor.execute('INSERT OR REPLACE INTO files (filename, link) VALUES (?, ?);', (filename, link))
         connection.commit()
     return True
 
+def parse_dir_name(path):
+    if not path:
+        return path
+    path = os.path.abspath(path)
+    if path.endswith('/'):
+        return path[:-1]
+    return path
+      
+def set_folders(connection):
+    cursor = connection.cursor()
+    cursor.execute('DROP TABLE IF EXISTS folders;')
+    cursor.execute('CREATE TABLE folders (folder TEXT, is_target INTEGER);')
+    while True:
+        print u'Введите путь до общей папки назначения:'
+        target = parse_dir_name(raw_input().decode('cp866'))
+        if not os.path.exists(target):
+            try:
+                os.makedirs(target)
+            except:
+                continue
+            else:
+                break
+        else:
+            break
+    cursor.execute('INSERT INTO folders (folder, is_target) VALUES (?, 1);', (target, ))
+    sources = []
+    while True:
+        print u'Введите путь для добавления файлов (пустая строка для окончания ввода):'
+        source = parse_dir_name(raw_input().decode('cp866'))
+        if source == '':
+            if sources:
+                break
+            print u'Необходимо ввысти хотябы один путь до папки с файлами'
+            continue
+        if not os.path.exists(source):
+            print u'Папка не существует'
+        else:
+            sources.append(source)
+            cursor.execute('INSERT INTO folders (folder, is_target) VALUES (?, 0);', (source, ))
+            continue
+    connection.commit()
 
-if not os.path.exists(TARGET):
-    os.makedirs(TARGET)
-connection = sqlite3.connect(os.path.join(TARGET, 'vlinker.sqlite'))
+def get_folders(connection):
+    cursor = connection.cursor()
+    cursor.execute('SELECT * FROM folders;')
+    target = None
+    sources = []
+    for folder, is_target in cursor.fetchall():
+        if is_target:
+            target = folder
+        else:
+            sources.append(folder)
+    return target, sources
+
+connection = sqlite3.connect(os.path.expanduser('~\\.vlinker.sqlite'))
 cursor = connection.cursor()
+try:
+    cursor.execute('SELECT * FROM folders;')
+except sqlite3.OperationalError:
+    set_folders(connection)
+TARGET, SOURCES = get_folders(connection)
+if TARGET is None or not SOURCES:
+    set_folders(connection)
+    TARGET, SOURCES = get_folders(connection)
+   
+if not os.path.exists(TARGET):
+    print u'Не найдена папка назначения.'
+    cursor.execute('DROP TABLE IF EXISTS files;')
+    os.makedirs(TARGET)
 try:
     cursor.execute('CREATE TABLE files(filename TEXT PRIMARY KEY, link TEXT);')
 except sqlite3.OperationalError:
-    print 'Поиск изменений...'
+    print u'Поиск изменений...'
     cursor.execute('SELECT * FROM files;')
     files = cursor.fetchall()
     links = {}
@@ -86,7 +147,7 @@ except sqlite3.OperationalError:
     move = []
     for dirpath, dirnames, filenames in os.walk(TARGET):
         for filename in filenames:
-            target_link = os.path.join(dirpath, filename).decode('cp1251')
+            target_link = os.path.join(dirpath, filename)
             try:
                 source_filename = get_reparse_target(target_link)
             except pywintypes.error:
@@ -102,15 +163,16 @@ except sqlite3.OperationalError:
                 path, name = os.path.split(source_filename)
                 target_filename = os.path.join(path, os.path.split(target_link)[1])
                 move.append((source_filename, source_link, target_filename, target_link))
-    print 'Found: %d, changed: %d, removed: %d.' % (found, len(move), len(links))
+    print u'Найдено файлов: %d, переименовано: %d, удалено: %d.' % (found, len(move), len(links))
     print
     if move:
-        print 'Files to be moved (%d):' % len(move)
+        print u'Файлы для переименования (%d):' % len(move)
         for source_filename, source_link, target_filename, target_link in move:
-            print source_filename, '->', target_filename
+            print source_filename.encode('cp866', 'replace'), '->', target_filename.encode('cp866', 'replace')
         print
         while True:
-            confirm = raw_input('Do you realy want to rename this files (yes/no)? ')
+            print u'Вы действительно хотите переиненовать эти файлы (yes/no)?',
+            confirm = raw_input()
             if confirm.lower() in ['y', 'n', 'yes', 'no']:
                 break
         if confirm.lower() in ['y', 'yes']:
@@ -119,62 +181,68 @@ except sqlite3.OperationalError:
             for source_filename, source_link, target_filename, target_link in move:
                 cursor.execute('DELETE FROM files WHERE filename = ?;', (source_filename, ))
                 connection.commit()
-                print source_filename,
+                print source_filename.encode('cp866', 'replace'),
                 error = False
                 try:
                     os.remove(target_link)
                 except:
-                    print '- fail to remove link.'
+                    print u'- ошибка удаления ссылки.'
                 else:
                     try:
                         os.rename(source_filename, target_filename)
                     except:
                         skipped += 1
-                        print '- fail to rename',
-                        if create_link(cursor, source_filename, target_link):
-                            print '- skipped.'
+                        print u'- ошибка переименования',
+                        if create_link(connection, source_filename, target_link):
+                            print u'- пропущен.'
                         else:
-                            print '- fail to create old link.'
+                            print u'- ошибка восстановления старой ссылки.'
                     else:
-                        if create_link(cursor, target_filename, target_link):
-                            print '- done.'
+                        if create_link(connection, target_filename, target_link):
+                            print u'- готово.'
                         else:
-                            print '- fail to create new link.'
-            print 'Moved: %d, skipped: %d.' % (len(move) - skipped, skipped)
+                            print u'- ошибка создания новой ссылки.'
+            print u'Перемещено: %d, пропущено: %d.' % (len(move) - skipped, skipped)
             print
     if links:
-        print 'Files to be removed (%d):' % len(links)
+        print u'Файлы для удаления (%d):' % len(links)
         for filename, link in links.iteritems():
-            print filename
+            print filename.encode('cp866', 'replace')
         print
         while True:
-            confirm = raw_input('Do you realy want to remove this files (yes/no)? ')
+            print u'Вы действительно хотите удалить эти файлы (yes/no)?',
+            confirm = raw_input()
             if confirm.lower() in ['y', 'n', 'yes', 'no']:
                 break
         if confirm.lower() in ['y', 'yes']:
             skipped = 0
             for filename, link in links.iteritems():
-                print filename,
+                print filename.encode('cp866', 'replace'),
                 cursor.execute('DELETE FROM files WHERE filename = ?;', (filename, ))
                 connection.commit()
                 try:
                     os.remove(filename)
                 except:
                     skipped += 1
-                    print '- fail to remove.'
+                    print u'- ошибка удаления.'
                 else:
-                    print '- ok.'
-            print 'Removed: %d, skipped: %d.' % (len(links) - skipped, skipped)
+                    print u'- готово.'
+            print u'Удалено: %d, пропущено: %d.' % (len(links) - skipped, skipped)
             print
-    raw_input('Press enter to continue...')
 else:
-    print 'Search for files...'
+    print u'Поиск новых файлов...'
     found = 0
     skipped = 0
+    files = []
     for source in SOURCES:
         for dirpath, dirnames, filenames in os.walk(source):
             for filename in filenames:
-                filename = os.path.join(dirpath, filename).decode('cp1251')
+                filename = os.path.join(dirpath, filename)
+                print filename.encode('cp866', 'replace'),
+                if filename in files:
+                    print u'- уже добавлен.'
+                    continue
+                files.append(filename)
                 name, ext = os.path.splitext(os.path.split(filename)[1])
                 link = os.path.join(TARGET, name + ext)
                 if os.path.exists(link):
@@ -184,12 +252,15 @@ else:
                         if not os.path.exists(link):
                             break
                         index += 1
-                if create_link(cursor, filename, link):
+                if create_link(connection, filename, link):
+                    print u'- готово.'
                     found += 1
                 else:
-                    print filename, '- fail to create link.'
+                    print u'- ошибка создания ссылки.'
                     skipped += 1
     connection.commit()
-    print 'Found: %d, skipped: %d' % (found, skipped)
-    raw_input('Press enter to continue...')
+    print u'Найдено файлов: %d, пропущено: %d' % (found, skipped)
+    print
 connection.close()
+print u'Нажмите Enter для завершения...',
+raw_input()
