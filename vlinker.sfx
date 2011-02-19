@@ -1,0 +1,5 @@
+Title=VLinker v1.0 -1- [15.02.2011] by a-iv@list.ru
+Path=vlinker
+Shortcut=P,vlinker.exe,VLinker,,VLinker
+Setup=vlinker.exe
+//del /q vlinker-setup.exe&"c:\program files\winrar\winrar.exe" a -mdg -m5 -s -sfx"c:\program files\winrar\default.sfx" -z"vlinker.sfx" -ibck -dh -ep1 -kb -r "vlinker-setup.exe" "dist\*"
